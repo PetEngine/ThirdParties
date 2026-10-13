@@ -1,0 +1,4 @@
+[submodule "shaderc"]
+	path = shaderc
+	url = https://github.com/google/shaderc.git
+	branch = main
