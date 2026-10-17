@@ -2,3 +2,7 @@
 	path = shaderc
 	url = https://github.com/google/shaderc.git
 	branch = main
+[submodule "spirv_reflect"]
+	path = spirv_reflect
+	url = https://github.com/KhronosGroup/SPIRV-Reflect
+	branch = main

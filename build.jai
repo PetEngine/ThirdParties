@@ -1,5 +1,6 @@
 Build :: enum_flags u64 {
     shaderc;
+    spirv_reflect;
 }
 
 #run {
@@ -23,10 +24,21 @@ Build :: enum_flags u64 {
     }
 
     if build & .shaderc {
+        auto_release_temp();
         if !buildShaderc()            then fatal("shaderc build has failed");
         if !generateShadercBindings() then fatal("shaderc bindings generation has failed");
     }
+
+    if build & .spirv_reflect {
+        auto_release_temp();
+        if !buildSpirvReflect()            then fatal("SPIRV-Reflect build has failed");
+        if !generateSpirvReflectBindings() then fatal("SPIRV-Reflect bindings generation has failed");
+    }
 }
+
+//
+// shaderc
+//
 
 buildShaderc :: () -> bool #compile_time {
     write_string("\n>>> shaderc build has started\n");
@@ -45,7 +57,7 @@ buildShaderc :: () -> bool #compile_time {
 
         result = run_command("cmake", "-S", "shaderc", "-B", "shaderc/build");
         if result.type != .EXITED || result.exit_code != 0 {
-            error("\"cmake generation\" has failed: %", result);
+            error("cmake generation has failed: %", result);
             return false;
         }
     }
@@ -111,6 +123,116 @@ generateShadercBindings :: () -> bool #compile_time {
     return true;
 }
 
+//
+// SPIRV-Reflect
+//
+
+buildSpirvReflect :: () -> bool #compile_time {
+    write_string("\n>>> SPIRV-Reflect build has started\n");
+
+    if !file_exists("spirv_reflect/build") {
+        if !make_directory_if_it_does_not_exist("spirv_reflect/build") {
+            error("make_directory_if_it_does_not_exist(\"spirv_reflect/build\") has failed\n");
+            return false;
+        }
+
+        result := run_command("cmake", "-S", "spirv_reflect", "-B", "spirv_reflect/build", "-D", "SPIRV_REFLECT_EXECUTABLE=OFF", "-D", "SPIRV_REFLECT_STATIC_LIB=ON", "-D", "SPIRV_REFLECT_INSTALL=OFF");
+        if result.type != .EXITED || result.exit_code != 0 {
+            error("cmake generation has failed: %", result);
+            return false;
+        }
+    }
+
+    result := run_command("cmake", "--build", "spirv_reflect/build", "--config", "RelWithDebInfo", "--parallel");
+    if result.type != .EXITED || result.exit_code != 0 {
+        error("cmake build has failed: %", result);
+        return false;
+    }
+
+    write_string(">>> SPIRV-Reflect build has ended\n");
+    return true;
+}
+
+generateSpirvReflectBindings :: () -> bool #compile_time {
+    write_string("\n>>> SPIRV-Reflect bindings generation has started\n");
+
+    delete_directory("output/spirv_reflect");
+    if !make_directory_if_it_does_not_exist("output/spirv_reflect/bin", true) {
+        error("make_directory_if_it_does_not_exist(\"output/spirv_reflect/bin\") has failed\n");
+        return false;
+    }
+
+    if !copy_file("spirv_reflect/build/RelWithDebInfo/spirv-reflect-static.lib", "output/spirv_reflect/bin/spirv-reflect-static.lib") {
+        error("copy_file(spirv-reflect-static.lib) has failed");
+        return false;
+    }
+    if !copy_file("spirv_reflect/LICENSE", "output/spirv_reflect/LICENSE") {
+        error("copy_file(LICENSE) has failed");
+        return false;
+    }
+
+    options : Generate_Bindings_Options;
+    options.alias_original_enum_names = false;
+    options.visitor = spirvReflectVisitor;
+
+    array_add(*options.library_search_paths, "spirv_reflect/build/RelWithDebInfo");
+    array_add(*options.libraries,            .{ "spirv-reflect-static", "spirv_reflect" });
+
+    array_add(*options.include_paths, "spirv_reflect");
+    array_add(*options.source_files,  "spirv_reflect.h");
+
+    result_builder, success := generate_bindings(options, true);
+    defer deinit(*g_spirv_reflect_enum_flags);
+    if !success {
+        error("generate_bindings has failed\n");
+        return false;
+    }
+
+    result := builder_to_string(*result_builder,, allocator = temp);
+    result  = replace(result, "spirv_reflect/build/RelWithDebInfo", "bin",, allocator = temp);
+
+    if !write_entire_file("output/spirv_reflect/module.jai", result) {
+        error("write_entire_file has failed");
+        return false;
+    }
+
+    write_string(">>> SPIRV-Reflect bindings generation has ended\n");
+    return true;
+}
+
+g_spirv_reflect_enum_flags : Table(string, *Enum);
+spirvReflectVisitor :: (decl: *Declaration, parent_decl: *Declaration) -> Declaration_Visit_Result {
+    if decl.kind == {
+        case .ENUM;
+            enum_decl := cast(*Enum) decl;
+            if ends_with(enum_decl.name, "FlagBits") {
+                enum_decl.flags |= .IS_ENUM_FLAGS;
+                enum_decl.flags |= .VALUES_IN_HEX;
+                table_add(*g_spirv_reflect_enum_flags, enum_decl.name, enum_decl);
+            }
+
+        case .TYPEDEF;
+            if ends_with(decl.name, "Flags") {
+                flag_bits_name := replace(decl.name, "Flags", "FlagBits",, allocator = temp);
+
+                found, enum_decl := table_find(*g_spirv_reflect_enum_flags, flag_bits_name);
+                if found {
+                    assert(enum_decl != null);
+
+                    decl.type = New(CType);
+                    decl.type.type_of_enum = enum_decl;
+                    decl.type.size         = enum_decl.type.size;
+                }
+            }
+    }
+
+    return .RECURSE;
+}
+
+//
+// Utils
+//
+
 parseCommandLine :: () -> Build #compile_time {
     INFO :: type_info(Build);
     #assert INFO.type == .ENUM;
@@ -158,5 +280,6 @@ fatal :: (format : string, args : ..Any, location := #caller_location) #compile_
 #import "Compiler";
 #import "File";
 #import "File_Utilities";
+#import "Hash_Table";
 #import "Process";
 #import "String";
